@@ -1,187 +1,106 @@
-state("Lil Gator Game") {}
+state("lil gator game") {}
 
 startup
 {
-	vars.Log = (Action<object>)(output => print("[lil gator game] " + output));
-
-	settings.Add("QP_Act1_Jill", true, "Finish Jill's Quest");
-	settings.Add("QP_Act1_Martin", true, "Finish Martin's Quest");
-	settings.Add("QP_Act1_Avery", true, "Finish Avery's Quest");
-
-	vars.TimerStart = (EventHandler) ((s, e) =>
-	{
-		foreach (var quest in current.Quests)
-			quest.Value = false;
-	});
-
-	timer.OnStart += vars.TimerStart;
+  Assembly.Load(File.ReadAllBytes("Components/asl-help")).CreateInstance("Unity");
+  vars.Helper.GameName = "lil gator game";
+  vars.Helper.Settings.CreateFromXml("Components/lilgatorgame.Settings.xml");
+  vars.Helper.AlertGameTime();
 }
 
 init
 {
-	vars.CancelSource = new CancellationTokenSource();
-	vars.MonoThread = new Thread(() =>
-	{
-		vars.Log("Starting mono thread.");
+  current.Flashback = false;
+  current.Item = null;
+  current.Friend = null;
 
-		int class_count = 0;
-		IntPtr class_cache = IntPtr.Zero, scMgr = IntPtr.Zero;
-		ProcessModuleWow64Safe uPlayer = null;
-		var scMgrTrg = new SigScanTarget(3, "48 8B 1D ???????? 0F 57 C0") { OnFound = (p, s, ptr) => ptr + 0x4 + p.ReadValue<int>(ptr) };
+  vars.Helper.TryLoad = (Func<dynamic, bool>)(mono =>
+  {
+    var srd = mono["SpeedrunData"];
+    if (srd.Static == IntPtr.Zero)
+      return false;
 
-		var token = vars.CancelSource.Token;
-		while (!token.IsCancellationRequested)
-		{
-			var mods = game.ModulesWow64Safe();
-			uPlayer = mods.FirstOrDefault(m => m.ModuleName == "UnityPlayer.dll");
-			if (uPlayer != null && mods.FirstOrDefault(m => m.ModuleName == "mono-2.0-bdwgc.dll") != null)
-				break;
+    vars.Helper["State"] = srd.Make<int>("state");
+    vars.Helper["IGT"] = srd.Make<double>("inGameTime");
 
-			vars.Log("Modules not found.");
-			Thread.Sleep(2000);
-		}
+    vars.Helper["TutorialEnd"] = srd.Make<bool>("tutorialEnd_LastInput");
+    vars.Helper["JillQuest"] = srd.Make<bool>("jillQuestComplete");
+    vars.Helper["MartinQuest"] = srd.Make<bool>("martinQuestComplete");
+    vars.Helper["AveryQuest"] = srd.Make<bool>("averyQuestComplete");
+    vars.Helper["Town"] = srd.Make<bool>("showTownToSis");
+    vars.Helper["Credits"] = srd.Make<bool>("credits");
+    vars.Helper["Home"] = srd.Make<bool>("thanksForPlaying");
 
-		while (!token.IsCancellationRequested)
-		{
-			var scanner = new SignatureScanner(game, uPlayer.BaseAddress, uPlayer.ModuleMemorySize);
+    vars.Helper["ObjectStates"] = mono.Make<IntPtr>("GameData", "instance", "gameSaveData", "objectStates");
 
-			if ((scMgr = scanner.Scan(scMgrTrg)) != IntPtr.Zero)
-			{
-				vars.Log("Found 'SceneManager' at 0x" + scMgr.ToString("X"));
-				break;
-			}
+    // handling collectibles
+    var list = mono["mscorlib", "List_1"];
 
-			vars.Log("SceneManager not found.");
-			Thread.Sleep(2000);
-		}
+    var itemPtr = srd.Make<int>("unlockedItems", list["_size"]);
+    vars.GetMostRecentItem = (Func<string>)(() =>
+    {
+      itemPtr.Update(game);
+      return vars.Helper.ReadString(srd.Static + srd["unlockedItems"], list["_items"], (itemPtr.Current + 3) * 0x8);
+    });
 
-		while (!token.IsCancellationRequested)
-		{
-			int size = new DeepPointer("mono-2.0-bdwgc.dll", 0x49A0C8, 0x18).Deref<int>(game);
-			var table = new DeepPointer("mono-2.0-bdwgc.dll", 0x49A0C8, 0x10, 0x8 * (int)(0xFA381AED % size)).Deref<IntPtr>(game);
+    var friendPtr = srd.Make<int>("unlockedFriends", list["_size"]);
+    vars.GetMostRecentFriend = (Func<string>)(() =>
+    {
+      friendPtr.Update(game);
+      return vars.Helper.ReadString(srd.Static + srd["unlockedFriends"], list["_items"], (friendPtr.Current + 3) * 0x8);
+    });
 
-			for (; table != IntPtr.Zero; table = game.ReadPointer(table + 0x10))
-			{
-				if (new DeepPointer(table, 0x0).DerefString(game, 32) != "Assembly-CSharp") continue;
-
-				class_count = new DeepPointer(table + 0x8, 0x4D8).Deref<int>(game);
-				class_cache = new DeepPointer(table + 0x8, 0x4E0).Deref<IntPtr>(game);
-			}
-
-			if (class_cache != IntPtr.Zero)
-				break;
-
-			vars.Log("Assembly-CSharp not found.");
-			Thread.Sleep(2000);
-		}
-
-		var mono = new Dictionary<string, IntPtr>
-		{
-			{ "QuestProfile", IntPtr.Zero },
-			{ "DialogueManager", IntPtr.Zero }
-		};
-
-		while (!token.IsCancellationRequested)
-		{
-			bool allFound = false;
-
-			for (int i = 0; i < class_count; ++i)
-			{
-				var klass = game.ReadPointer(class_cache + 0x8 * i);
-				for (; klass != IntPtr.Zero; klass = game.ReadPointer(klass + 0x108))
-				{
-					string class_name = new DeepPointer(klass + 0x48, 0x0).DerefString(game, 32);
-					if (!mono.ContainsKey(class_name)) continue;
-
-					mono[class_name] = new DeepPointer(klass + 0xD0, 0x8, 0x60).Deref<IntPtr>(game);
-					vars.Log("Found '" + class_name + "' at 0x" + mono[class_name].ToString("X") + ".");
-
-					if (allFound = mono.Values.All(ptr => ptr != IntPtr.Zero))
-						break;
-				}
-
-				if (allFound)
-					break;
-			}
-
-			if (allFound)
-			{
-				vars.Mono = mono;
-				vars.Watchers = new MemoryWatcherList
-				{
-					new MemoryWatcher<int>(new DeepPointer(scMgr, 0x50, 0x0, 0x98)) { Name = "SceneIndex" },
-					new MemoryWatcher<int>(new DeepPointer(mono["QuestProfile"], 0x18)) { Name = "QuestCount" },
-					new StringWatcher(new DeepPointer(mono["DialogueManager"], 0x18, 0x30, 0x14), 512) { Name = "Dialogue" },
-					new MemoryWatcher<bool>(new DeepPointer(mono["DialogueManager"], 0xBC)) { Name = "InDialogue" }
-				};
-
-				break;
-			}
-
-			vars.Log("Not all classes found.");
-			Thread.Sleep(5000);
-		}
-
-		vars.Log("Exiting mono thread.");
-	});
-
-	vars.MonoThread.Start();
-	current.Quests = new Dictionary<string, bool>
-	{
-		{ "QP_Act1_Jill", false },
-		{ "QP_Act1_Martin", false },
-		{ "QP_Act1_Avery", false },
-		{ "QP_Act1_Friends", false }
-	};
+    return true;
+  });
 }
 
 update
 {
-	if (vars.MonoThread.IsAlive) return false;
-
-	vars.Watchers.UpdateAll(game);
-
-	current.SceneIndex = vars.Watchers["SceneIndex"].Current;
-	current.Dialogue = vars.Watchers["Dialogue"].Current;
-	current.InDialogue = vars.Watchers["InDialogue"].Current;
+  current.Item = vars.GetMostRecentItem();
+  current.Friend = vars.GetMostRecentFriend();
 }
 
 start
 {
-	return old.SceneIndex == 1 && current.SceneIndex == -1;
+  return old.State == 0 && current.State == 1;
 }
 
 split
 {
-	var questSplit = false;
-	var count = vars.Watchers["QuestCount"].Current;
-	for (int i = 4; i > 0; --i)
-	{
-		var ptr = new DeepPointer((IntPtr)vars.Mono["QuestProfile"], 0x10, 0x20 + 0x8 * (count - i)).Deref<IntPtr>(game);
-		string id = new DeepPointer(ptr + 0x18, 0x14).DerefString(game, 32);
-		bool state = game.ReadValue<bool>(ptr + 0x41);
+  if (settings["flashback"])
+  {
+    var count = current.ObjectStates + (vars.Helper.PtrSize * 3);
+    if (vars.Helper.Read<int>(count) >= 965)
+    {
+      var finalObj = current.ObjectStates + (vars.Helper.PtrSize * 4) + 965;
+      current.Flashback = vars.Helper.Read<bool>(finalObj);
 
-		if (!old.Quests[id] && state)
-			questSplit = true;
+      if (!old.Flashback && current.Flashback)
+        return true;
+    }
+  }
 
-		current.Quests[id] = state;
-	}
-
-	return questSplit || old.InDialogue && !current.InDialogue && current.Dialogue == "but i can't :) because this is a demo" + Environment.NewLine + ":)";
+  return old.Item != current.Item && settings[current.Item] || old.Friend != current.Friend && settings[current.Friend]
+         || !old.TutorialEnd && current.TutorialEnd && settings["tutorialEnd"]
+         || !old.JillQuest && current.JillQuest && settings["jillQuest"]
+         || !old.MartinQuest && current.MartinQuest && settings["martinQuest"]
+         || !old.AveryQuest && current.AveryQuest && settings["averyQuest"]
+         || !old.Town && current.Town && settings["showTown"]
+         || !old.Credits && current.Credits && settings["credits"]
+         || !old.Home && current.Home && settings["goHome"];
 }
 
 reset
 {
-	return old.SceneIndex == -1 && current.SceneIndex == 0;
+  return old.State != 0 && current.State == 0;
 }
 
-exit
+gameTime
 {
-	vars.CancelSource.Cancel();
+  return TimeSpan.FromSeconds(current.IGT);
 }
 
-shutdown
+isLoading
 {
-	timer.OnStart -= vars.TimerStart;
-	vars.CancelSource.Cancel();
+  return true;
 }
